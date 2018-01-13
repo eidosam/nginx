@@ -126,7 +126,7 @@ static u_char *ngx_http_log_request_length(ngx_http_request_t *r, u_char *buf,
     ngx_http_log_op_t *op);
 
 static ngx_int_t ngx_http_log_variable_compile(ngx_conf_t *cf,
-    ngx_http_log_op_t *op, ngx_str_t *value, ngx_uint_t json);
+    ngx_http_log_op_t *op, ngx_str_t *value, ngx_uint_t escape);
 static size_t ngx_http_log_variable_getlen(ngx_http_request_t *r,
     uintptr_t data);
 static u_char *ngx_http_log_variable(ngx_http_request_t *r, u_char *buf,
@@ -135,6 +135,10 @@ static uintptr_t ngx_http_log_escape(u_char *dst, u_char *src, size_t size);
 static size_t ngx_http_log_json_variable_getlen(ngx_http_request_t *r,
     uintptr_t data);
 static u_char *ngx_http_log_json_variable(ngx_http_request_t *r, u_char *buf,
+    ngx_http_log_op_t *op);
+static size_t ngx_http_log_noescape_variable_getlen(ngx_http_request_t *r,
+    uintptr_t data);
+static u_char *ngx_http_log_noescape_variable(ngx_http_request_t *r, u_char *buf,
     ngx_http_log_op_t *op);
 
 
@@ -905,7 +909,7 @@ ngx_http_log_request_length(ngx_http_request_t *r, u_char *buf,
 
 static ngx_int_t
 ngx_http_log_variable_compile(ngx_conf_t *cf, ngx_http_log_op_t *op,
-    ngx_str_t *value, ngx_uint_t json)
+    ngx_str_t *value, ngx_uint_t escape)
 {
     ngx_int_t  index;
 
@@ -916,7 +920,11 @@ ngx_http_log_variable_compile(ngx_conf_t *cf, ngx_http_log_op_t *op,
 
     op->len = 0;
 
-    if (json) {
+    if (escape == 2) {
+        op->getlen = ngx_http_log_noescape_variable_getlen;
+        op->run = ngx_http_log_noescape_variable;
+
+    } else if (escape == 1) {
         op->getlen = ngx_http_log_json_variable_getlen;
         op->run = ngx_http_log_json_variable;
 
@@ -930,6 +938,36 @@ ngx_http_log_variable_compile(ngx_conf_t *cf, ngx_http_log_op_t *op,
     return NGX_OK;
 }
 
+static size_t
+ngx_http_log_noescape_variable_getlen(ngx_http_request_t *r, uintptr_t data)
+{
+    ngx_http_variable_value_t  *value;
+
+    value = ngx_http_get_indexed_variable(r, data);
+
+    if (value == NULL || value->not_found) {
+        return 1;
+    }
+
+    value->escape = 0;
+
+    return value->len;
+}
+
+static u_char *
+ngx_http_log_noescape_variable(ngx_http_request_t *r, u_char *buf, ngx_http_log_op_t *op)
+{
+    ngx_http_variable_value_t  *value;
+
+    value = ngx_http_get_indexed_variable(r, op->data);
+
+    if (value == NULL || value->not_found) {
+        *buf = '-';
+        return buf + 1;
+    }
+
+    return ngx_cpymem(buf, value->data, value->len);
+}
 
 static size_t
 ngx_http_log_variable_getlen(ngx_http_request_t *r, uintptr_t data)
@@ -1536,18 +1574,21 @@ ngx_http_log_compile_format(ngx_conf_t *cf, ngx_array_t *flushes,
     size_t               i, len;
     ngx_str_t           *value, var;
     ngx_int_t           *flush;
-    ngx_uint_t           bracket, json;
+    ngx_uint_t           bracket, escape;
     ngx_http_log_op_t   *op;
     ngx_http_log_var_t  *v;
 
-    json = 0;
+    escape = 0;
     value = args->elts;
 
     if (s < args->nelts && ngx_strncmp(value[s].data, "escape=", 7) == 0) {
         data = value[s].data + 7;
 
-        if (ngx_strcmp(data, "json") == 0) {
-            json = 1;
+        if (ngx_strcmp(data, "none") == 0) {
+            escape = 2;
+
+        } else if (ngx_strcmp(data, "json") == 0) {
+            escape = 1;
 
         } else if (ngx_strcmp(data, "default") != 0) {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
@@ -1636,7 +1677,7 @@ ngx_http_log_compile_format(ngx_conf_t *cf, ngx_array_t *flushes,
                     }
                 }
 
-                if (ngx_http_log_variable_compile(cf, op, &var, json)
+                if (ngx_http_log_variable_compile(cf, op, &var, escape)
                     != NGX_OK)
                 {
                     return NGX_CONF_ERROR;
